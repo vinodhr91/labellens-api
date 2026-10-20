@@ -1,3 +1,5 @@
+import httpx
+from supabase.lib.client_options import SyncClientOptions
 import json
 import os
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
@@ -35,8 +37,16 @@ supabase_key = os.getenv("SUPABASE_KEY")
 if supabase_url:
     supabase_url = supabase_url.strip().rstrip('/')
 
-# Create the client
-supabase: Client = create_client(supabase_url, supabase_key)
+# Create a dedicated HTTP client for the database
+# This prevents the Storage client from overwriting the base URL
+db_httpx_client = httpx.Client(
+    base_url=f"{supabase_url}/rest/v1",
+    headers={"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
+)
+
+# Create the client with the isolated HTTP client
+options = SyncClientOptions(httpx_client=db_httpx_client)
+supabase: Client = create_client(supabase_url, supabase_key, options=options)
 
 @app.post("/api/analyze")
 async def analyze_label(
