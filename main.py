@@ -1,14 +1,12 @@
-import httpx
-from supabase.lib.client_options import SyncClientOptions
 import json
 import os
+import httpx
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 import google.generativeai as genai
 from dotenv import load_dotenv
 from typing import Optional
 from pydantic import BaseModel
-from supabase import create_client, Client
 
 load_dotenv()
 app = FastAPI()
@@ -26,27 +24,9 @@ with open("rules.json", "r") as f:
 
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
-
-# ... (your other imports) ...
-
-# Initialize Supabase
-supabase_url = os.getenv("SUPABASE_URL")
-supabase_key = os.getenv("SUPABASE_KEY")
-
-# Force-clean the URL
-if supabase_url:
-    supabase_url = supabase_url.strip().rstrip('/')
-
-# Create a dedicated HTTP client for the database
-# This prevents the Storage client from overwriting the base URL
-db_httpx_client = httpx.Client(
-    base_url=f"{supabase_url}/rest/v1",
-    headers={"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
-)
-
-# Create the client with the isolated HTTP client
-options = SyncClientOptions(httpx_client=db_httpx_client)
-supabase: Client = create_client(supabase_url, supabase_key, options=options)
+# Get Supabase credentials
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip('/')
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 @app.post("/api/analyze")
 async def analyze_label(
@@ -125,7 +105,6 @@ async def analyze_label(
     else:
         verdict = "✅ WITHIN DAILY LIMITS"
 
-    # Detect hidden ingredients
     hidden_ingredients_db = {
         "invert sugar": "A highly processed liquid sugar that spikes blood sugar faster than table sugar.",
         "liquid glucose": "A cheap sweetener made from starch. It adds empty calories and raises blood sugar rapidly.",
@@ -145,18 +124,29 @@ async def analyze_label(
     if "sugar" in raw_ingredients_text and not any(f["name"] == "Sugar" for f in detected_flags):
          detected_flags.append({"name": "Sugar", "meaning": "Standard added sugar. High intake is linked to weight gain and tooth decay."})
 
-    # Log to Supabase
+    # LOG TO SUPABASE DIRECTLY VIA HTTPX
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal"
+    }
+    payload = {
+        "product_name": extracted_data.get("product_name"),
+        "age_group": age_group,
+        "sugar_pct": sugar_pct,
+        "fat_pct": fat_pct,
+        "sodium_pct": sodium_pct,
+        "verdict": verdict
+    }
+    
     try:
-        supabase.table("scans").insert({
-            "product_name": extracted_data.get("product_name"),
-            "age_group": age_group,
-            "sugar_pct": sugar_pct,
-            "fat_pct": fat_pct,
-            "sodium_pct": sodium_pct,
-            "verdict": verdict
-        }).execute()
+        async with httpx.AsyncClient() as client:
+            db_response = await client.post(f"{SUPABASE_URL}/rest/v1/scans", headers=headers, json=payload)
+            if db_response.status_code >= 400:
+                print(f"Supabase Error: {db_response.text}")
     except Exception as e:
-        print(f"Supabase log error: {e}") # Don't crash the app if DB fails
+        print(f"Supabase log error: {e}")
 
     return {
         "product": extracted_data.get("product_name"),
@@ -186,13 +176,25 @@ class Feedback(BaseModel):
 
 @app.post("/api/feedback")
 async def submit_feedback(feedback: Feedback):
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal"
+    }
+    payload = {
+        "product_name": feedback.product_name,
+        "is_accurate": feedback.is_accurate,
+        "user_comment": feedback.user_comment
+    }
+    
     try:
-        supabase.table("feedback").insert({
-            "product_name": feedback.product_name,
-            "is_accurate": feedback.is_accurate,
-            "user_comment": feedback.user_comment
-        }).execute()
-        return {"status": "success", "message": "Thank you for your feedback!"}
+        async with httpx.AsyncClient() as client:
+            db_response = await client.post(f"{SUPABASE_URL}/rest/v1/feedback", headers=headers, json=payload)
+            if db_response.status_code >= 400:
+                print(f"Feedback Error: {db_response.text}")
+                raise HTTPException(status_code=500, detail="Failed to save feedback")
     except Exception as e:
-        print(f"Supabase feedback error: {e}")
-        raise HTTPException(status_code=500, detail="Failed to save feedback")
+        raise HTTPException(status_code=500, detail=f"DB Error: {str(e)}")
+        
+    return {"status": "success", "message": "Thank you for your feedback!"}
