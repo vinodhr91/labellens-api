@@ -6,6 +6,7 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 from typing import Optional
 from pydantic import BaseModel
+from supabase import create_client, Client
 
 load_dotenv()
 app = FastAPI()
@@ -18,18 +19,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load the rules JSON
 with open("rules.json", "r") as f:
     RULES = json.load(f)
 
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+# Initialize Supabase
+supabase_url = os.getenv("SUPABASE_URL")
+supabase_key = os.getenv("SUPABASE_KEY")
+supabase: Client = create_client(supabase_url, supabase_key)
 
 @app.post("/api/analyze")
 async def analyze_label(
     age_group: str = Form(...),
     gender: str = Form("Unknown"), 
     image1: UploadFile = File(...), 
-    image2: Optional[UploadFile] = File(None) # Optional second image
+    image2: Optional[UploadFile] = File(None)
 ):
     if age_group not in RULES["age_brackets"]:
         raise HTTPException(status_code=400, detail="Invalid age group selected.")
@@ -101,6 +106,39 @@ async def analyze_label(
     else:
         verdict = "✅ WITHIN DAILY LIMITS"
 
+    # Detect hidden ingredients
+    hidden_ingredients_db = {
+        "invert sugar": "A highly processed liquid sugar that spikes blood sugar faster than table sugar.",
+        "liquid glucose": "A cheap sweetener made from starch. It adds empty calories and raises blood sugar rapidly.",
+        "maltodextrin": "A highly processed starch used as a filler and thickener. It has a higher glycemic index than table sugar.",
+        "palmolein": "A cheap industrial palm oil high in saturated fats, often used to cut costs.",
+        "high fructose corn syrup": "A highly refined sweetener linked to increased risk of obesity and metabolic issues."
+    }
+
+    raw_ingredients_text = extracted_data.get("ingredients_list", "").lower()
+    detected_flags = []
+
+    for key, meaning in hidden_ingredients_db.items():
+        if key in raw_ingredients_text:
+            display_name = key.title()
+            detected_flags.append({"name": display_name, "meaning": meaning})
+            
+    if "sugar" in raw_ingredients_text and not any(f["name"] == "Sugar" for f in detected_flags):
+         detected_flags.append({"name": "Sugar", "meaning": "Standard added sugar. High intake is linked to weight gain and tooth decay."})
+
+    # Log to Supabase
+    try:
+        supabase.table("scans").insert({
+            "product_name": extracted_data.get("product_name"),
+            "age_group": age_group,
+            "sugar_pct": sugar_pct,
+            "fat_pct": fat_pct,
+            "sodium_pct": sodium_pct,
+            "verdict": verdict
+        }).execute()
+    except Exception as e:
+        print(f"Supabase log error: {e}") # Don't crash the app if DB fails
+
     return {
         "product": extracted_data.get("product_name"),
         "serving_size": extracted_data.get("serving_size"),
@@ -116,14 +154,12 @@ async def analyze_label(
             "carbs_g": extracted_data.get("carbs_g_per_serving", 0.0),
             "total_fat_g": extracted_data.get("total_fat_g_per_serving", 0.0)
         },
+        "hidden_ingredients": detected_flags, 
         "raw_ingredients": extracted_data.get("ingredients_list"),
         "citations": RULES.get("governing_bodies", []), 
         "disclaimer": "This is an educational tool based on public WHO/ICMR/FSSAI guidelines. It is not medical advice."
     }
 
-# ==========================================
-# HUMAN FEEDBACK LOOP ENDPOINT
-# ==========================================
 class Feedback(BaseModel):
     product_name: str
     user_comment: str
@@ -131,12 +167,13 @@ class Feedback(BaseModel):
 
 @app.post("/api/feedback")
 async def submit_feedback(feedback: Feedback):
-    # In the future, we will save this to Supabase
-    # For now, we just print it to the Render logs so you can see it working.
-    print(f"--- NEW FEEDBACK ---")
-    print(f"Product: {feedback.product_name}")
-    print(f"Accurate: {feedback.is_accurate}")
-    print(f"Comment: {feedback.user_comment}")
-    print(f"--------------------")
-    
-    return {"status": "success", "message": "Thank you for your feedback!"}
+    try:
+        supabase.table("feedback").insert({
+            "product_name": feedback.product_name,
+            "is_accurate": feedback.is_accurate,
+            "user_comment": feedback.user_comment
+        }).execute()
+        return {"status": "success", "message": "Thank you for your feedback!"}
+    except Exception as e:
+        print(f"Supabase feedback error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to save feedback")
