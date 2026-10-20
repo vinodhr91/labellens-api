@@ -24,7 +24,6 @@ with open("rules.json", "r") as f:
 
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
-from postgrest import SyncPostgrestClient # Add this import
 
 # ... (your other imports) ...
 
@@ -36,11 +35,8 @@ supabase_key = os.getenv("SUPABASE_KEY")
 if supabase_url:
     supabase_url = supabase_url.strip().rstrip('/')
 
-# Create the main client
+# Create the client
 supabase: Client = create_client(supabase_url, supabase_key)
-
-# THE FIX: Overwrite the postgrest client to force the correct /rest/v1 path
-supabase.postgrest = SyncPostgrestClient(f"{supabase_url}/rest/v1", headers=supabase.options.headers)
 
 @app.post("/api/analyze")
 async def analyze_label(
