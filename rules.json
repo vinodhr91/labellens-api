@@ -1,16 +1,19 @@
 {
-    "governing_bodies": [
+  "governing_bodies": [
     {
       "name": "ICMR-NIN 2020",
-      "plain_english": "The Indian Council of Medical Research sets daily energy requirements. We use this to calculate exactly how many grams of sugar a child of a specific age can safely consume based on their daily calorie needs."
+      "explanation": "We use the Indian Council of Medical Research (ICMR) energy requirements to calculate exact, age-specific daily limits for your family.",
+      "url": "https://www.nin.res.in/rdabook/brief_note.pdf"
     },
     {
       "name": "WHO 2015",
-      "plain_english": "The World Health Organization recommends that 'free sugars' (added sugars) should be less than 10% of your total daily energy intake. For a standard adult diet, that is roughly 50g (or 12 teaspoons) per day."
+      "explanation": "The World Health Organization recommends that 'free sugars' stay under 10% of your total daily energy intake. For a standard adult diet, this is roughly 50g (or 12 teaspoons) per day.",
+      "url": "https://www.who.int/publications/i/item/9789241549028"
     },
     {
       "name": "FSSAI 2020",
-      "plain_english": "The Food Safety and Standards Authority of India mandates how nutrition labels must be printed. We use their standard Reference Daily Allowance (RDA) of 50g of added sugar for adults to calculate your percentages."
+      "explanation": "The Food Safety and Standards Authority of India mandates how nutrition labels must be printed, including the standard Reference Daily Allowance (RDA) used to calculate percentages.",
+      "url": "https://fssai.gov.in/upload/uploadfiles/files/Compendium_Labelling_Display_17_10_2022.pdf"
     }
   ],
   "age_brackets": {
