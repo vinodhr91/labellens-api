@@ -62,22 +62,18 @@ HIDDEN_INGREDIENTS_DB = {
 }
 
 async def extract_label_data(image_bytes: bytes, mime_type: str) -> dict:
-    model = genai.GenerativeModel('gemini-2.5-flash-lite')
     content = [PROMPT, {"mime_type": mime_type, "data": image_bytes}]
-    
-    try:
-        response = await asyncio.to_thread(model.generate_content, content)
-        cleaned_text = response.text.replace("```json", "").replace("```", "").strip()
-        return json.loads(cleaned_text)
-    except Exception as e:
-        # Fallback to gemini-1.5-flash if model name differs
+    last_err = None
+    for model_name in ['gemini-3.5-flash-lite', 'gemini-1.5-flash', 'gemini-2.5-flash']:
         try:
-            fallback_model = genai.GenerativeModel('gemini-1.5-flash')
-            response = await asyncio.to_thread(fallback_model.generate_content, content)
+            model = genai.GenerativeModel(model_name)
+            response = await asyncio.to_thread(model.generate_content, content)
             cleaned_text = response.text.replace("```json", "").replace("```", "").strip()
             return json.loads(cleaned_text)
-        except Exception:
-            raise HTTPException(status_code=500, detail=f"Failed to process image: {str(e)}")
+        except Exception as e:
+            last_err = e
+            continue
+    raise HTTPException(status_code=500, detail=f"Failed to process image: {str(last_err)}")
 
 def calculate_product_metrics(extracted_data: dict, limits: dict) -> dict:
     sugar_val = extracted_data.get("sugar_g_per_serving", 0.0)
