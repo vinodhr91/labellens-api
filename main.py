@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import httpx
@@ -9,7 +10,7 @@ from typing import Optional
 from pydantic import BaseModel
 
 load_dotenv()
-app = FastAPI()
+app = FastAPI(title="LabelLens API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -28,130 +29,102 @@ genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip('/')
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-@app.post("/api/analyze")
-async def analyze_label(
-    age_group: str = Form(...),
-    gender: str = Form("Unknown"), 
-    image1: UploadFile = File(...), 
-    image2: Optional[UploadFile] = File(None)
-):
-    if age_group not in RULES["age_brackets"]:
-        raise HTTPException(status_code=400, detail="Invalid age group selected.")
+PROMPT = """
+You are a precise food label OCR extraction engine. Analyze the provided image of a food label.
+Extract the following fields strictly as JSON.
 
-    image1_bytes = await image1.read()
-    image2_bytes = await image2.read() if image2 else None
+CRITICAL INSTRUCTIONS:
+1. Look for "Added Sugars" first. If not found, look for "Total Sugars".
+2. Look for "Saturated Fat", "Total Fat", "Protein", "Carbohydrates".
+3. Look for "Sodium" (in mg).
+4. Extract all values PER SERVING. If the label only shows "per 100g", calculate the per-serving value based on the serving size.
 
-    prompt = """
-    You are a precise food label OCR extraction engine. Analyze the provided image(s) of a food label.
-    Extract the following fields strictly as JSON.
-    
-    CRITICAL INSTRUCTIONS:
-    1. Look for "Added Sugars" first. If not found, look for "Total Sugars".
-    2. Look for "Saturated Fat", "Total Fat", "Protein", "Carbohydrates".
-    3. Look for "Sodium" (in mg).
-    4. Extract all values PER SERVING. If the label only shows "per 100g", calculate the per-serving value based on the serving size.
-    
-    {
-      "product_name": "string",
-      "serving_size": "string",
-      "sugar_g_per_serving": float,
-      "sat_fat_g_per_serving": float,
-      "sodium_mg_per_serving": float,
-      "protein_g_per_serving": float,
-      "carbs_g_per_serving": float,
-      "total_fat_g_per_serving": float,
-      "ingredients_list": "string of raw text"
-    }
-    If a field is missing, set numerical values to 0.0 and strings to 'Unknown'.
-    """
+{
+  "product_name": "string",
+  "serving_size": "string",
+  "sugar_g_per_serving": float,
+  "sat_fat_g_per_serving": float,
+  "sodium_mg_per_serving": float,
+  "protein_g_per_serving": float,
+  "carbs_g_per_serving": float,
+  "total_fat_g_per_serving": float,
+  "ingredients_list": "string of raw text"
+}
+If a field is missing, set numerical values to 0.0 and strings to 'Unknown'.
+"""
 
-    model = genai.GenerativeModel('gemini-3.5-flash-lite')
+HIDDEN_INGREDIENTS_DB = {
+    "invert sugar": "A highly processed liquid sugar that spikes blood sugar faster than table sugar.",
+    "liquid glucose": "A cheap sweetener made from starch. It adds empty calories and raises blood sugar rapidly.",
+    "maltodextrin": "A highly processed starch used as a filler and thickener. It has a higher glycemic index than table sugar.",
+    "palmolein": "A cheap industrial palm oil high in saturated fats, often used to cut costs.",
+    "high fructose corn syrup": "A highly refined sweetener linked to increased risk of obesity and metabolic issues."
+}
+
+async def extract_label_data(image_bytes: bytes, mime_type: str) -> dict:
+    model = genai.GenerativeModel('gemini-2.5-flash-lite')
+    content = [PROMPT, {"mime_type": mime_type, "data": image_bytes}]
     
     try:
-        content = [prompt, {"mime_type": image1.content_type, "data": image1_bytes}]
-        if image2_bytes:
-            content.append({"mime_type": image2.content_type, "data": image2_bytes})
-            
-        response = model.generate_content(content)
+        response = await asyncio.to_thread(model.generate_content, content)
         cleaned_text = response.text.replace("```json", "").replace("```", "").strip()
-        extracted_data = json.loads(cleaned_text)
+        return json.loads(cleaned_text)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to process image: {str(e)}")
+        # Fallback to gemini-1.5-flash if model name differs
+        try:
+            fallback_model = genai.GenerativeModel('gemini-1.5-flash')
+            response = await asyncio.to_thread(fallback_model.generate_content, content)
+            cleaned_text = response.text.replace("```json", "").replace("```", "").strip()
+            return json.loads(cleaned_text)
+        except Exception:
+            raise HTTPException(status_code=500, detail=f"Failed to process image: {str(e)}")
 
-    limits = RULES["age_brackets"][age_group]
-    
+def calculate_product_metrics(extracted_data: dict, limits: dict) -> dict:
     sugar_val = extracted_data.get("sugar_g_per_serving", 0.0)
     sat_fat_val = extracted_data.get("sat_fat_g_per_serving", 0.0)
     sodium_val = extracted_data.get("sodium_mg_per_serving", 0.0)
-    
+
     max_sugar = limits["max_sugar_g"]
     max_sat_fat = limits["max_sat_fat_g"]
     max_sodium = limits["max_sodium_mg"]
-    
+
     sugar_pct = round((sugar_val / max_sugar) * 100, 1) if max_sugar > 0 else (100 if sugar_val > 0 else 0)
     fat_pct = round((sat_fat_val / max_sat_fat) * 100, 1) if max_sat_fat > 0 else (100 if sat_fat_val > 0 else 0)
     sodium_pct = round((sodium_val / max_sodium) * 100, 1) if max_sodium > 0 else (100 if sodium_val > 0 else 0)
     teaspoons = round(sugar_val / 4.0, 1)
 
-    flags = []
-    if sugar_pct > 50: flags.append("High Sugar")
-    if fat_pct > 50: flags.append("High Saturated Fat")
-    if sodium_pct > 50: flags.append("High Sodium")
+    max_pct = max(sugar_pct, fat_pct, sodium_pct)
 
+    # Verdict Logic:
+    # If the highest metric is >100%, show '🚨 EXCEEDS DAILY LIMITS'
+    # If >=25%, show '⚠️ MODERATE LEVELS'
+    # If <25%, show '✅ WITHIN DAILY LIMITS'
     if max_sugar == 0 and (sugar_val > 0 or sodium_val > 0):
         verdict = "🚨 NOT RECOMMENDED FOR INFANTS"
-    elif flags:
-        verdict = "⚠️ EXCEEDS DAILY LIMIT: " + ", ".join(flags)
+    elif max_pct > 100:
+        verdict = "🚨 EXCEEDS DAILY LIMITS"
+    elif max_pct >= 25:
+        verdict = "⚠️ MODERATE LEVELS"
     else:
         verdict = "✅ WITHIN DAILY LIMITS"
-
-    hidden_ingredients_db = {
-        "invert sugar": "A highly processed liquid sugar that spikes blood sugar faster than table sugar.",
-        "liquid glucose": "A cheap sweetener made from starch. It adds empty calories and raises blood sugar rapidly.",
-        "maltodextrin": "A highly processed starch used as a filler and thickener. It has a higher glycemic index than table sugar.",
-        "palmolein": "A cheap industrial palm oil high in saturated fats, often used to cut costs.",
-        "high fructose corn syrup": "A highly refined sweetener linked to increased risk of obesity and metabolic issues."
-    }
 
     raw_ingredients_text = extracted_data.get("ingredients_list", "").lower()
     detected_flags = []
 
-    for key, meaning in hidden_ingredients_db.items():
+    for key, meaning in HIDDEN_INGREDIENTS_DB.items():
         if key in raw_ingredients_text:
             display_name = key.title()
             detected_flags.append({"name": display_name, "meaning": meaning})
-            
-    if "sugar" in raw_ingredients_text and not any(f["name"] == "Sugar" for f in detected_flags):
-         detected_flags.append({"name": "Sugar", "meaning": "Standard added sugar. High intake is linked to weight gain and tooth decay."})
 
-    # LOG TO SUPABASE DIRECTLY VIA HTTPX
-    headers = {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json",
-        "Prefer": "return=minimal"
-    }
-    payload = {
-        "product_name": extracted_data.get("product_name"),
-        "age_group": age_group,
-        "sugar_pct": sugar_pct,
-        "fat_pct": fat_pct,
-        "sodium_pct": sodium_pct,
-        "verdict": verdict
-    }
-    
-    try:
-        async with httpx.AsyncClient() as client:
-            db_response = await client.post(f"{SUPABASE_URL}/rest/v1/scans", headers=headers, json=payload)
-            if db_response.status_code >= 400:
-                print(f"Supabase Error: {db_response.text}")
-    except Exception as e:
-        print(f"Supabase log error: {e}")
+    if "sugar" in raw_ingredients_text and not any(f["name"] == "Sugar" for f in detected_flags):
+        detected_flags.append({
+            "name": "Sugar",
+            "meaning": "Standard added sugar. High intake is linked to weight gain and tooth decay."
+        })
 
     return {
-        "product": extracted_data.get("product_name"),
-        "serving_size": extracted_data.get("serving_size"),
-        "demographic": limits.get("label"),
+        "product": extracted_data.get("product_name") or "Scanned Food Product",
+        "serving_size": extracted_data.get("serving_size") or "Unknown",
         "verdict": verdict,
         "breakdown": {
             "sugar": {"value_g": sugar_val, "limit_g": max_sugar, "percentage": sugar_pct, "teaspoons": teaspoons},
@@ -163,10 +136,85 @@ async def analyze_label(
             "carbs_g": extracted_data.get("carbs_g_per_serving", 0.0),
             "total_fat_g": extracted_data.get("total_fat_g_per_serving", 0.0)
         },
-        "hidden_ingredients": detected_flags, 
+        "hidden_ingredients": detected_flags,
         "raw_ingredients": extracted_data.get("ingredients_list"),
-        "citations": RULES.get("governing_bodies", []), 
-        "disclaimer": "This is an educational tool based on public WHO/ICMR/FSSAI guidelines. It is not medical advice."
+    }
+
+@app.post("/api/analyze")
+async def analyze_label(
+    age_group: str = Form(...),
+    gender: str = Form("Unknown"), 
+    image1: UploadFile = File(...), 
+    image2: Optional[UploadFile] = File(None)
+):
+    if age_group not in RULES["age_brackets"]:
+        raise HTTPException(status_code=400, detail="Invalid age group selected.")
+
+    limits = RULES["age_brackets"][age_group]
+
+    image1_bytes = await image1.read()
+    image2_bytes = await image2.read() if image2 else None
+
+    # If image2 is provided, process both images concurrently
+    if image2_bytes:
+        extracted_a, extracted_b = await asyncio.gather(
+            extract_label_data(image1_bytes, image1.content_type),
+            extract_label_data(image2_bytes, image2.content_type)
+        )
+        product_a = calculate_product_metrics(extracted_a, limits)
+        product_b = calculate_product_metrics(extracted_b, limits)
+    else:
+        extracted_a = await extract_label_data(image1_bytes, image1.content_type)
+        product_a = calculate_product_metrics(extracted_a, limits)
+        product_b = None
+
+    # LOG TO SUPABASE DIRECTLY VIA HTTPX
+    if SUPABASE_URL and SUPABASE_KEY:
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal"
+        }
+        try:
+            async with httpx.AsyncClient() as client:
+                payload_a = {
+                    "product_name": product_a.get("product"),
+                    "age_group": age_group,
+                    "sugar_pct": product_a["breakdown"]["sugar"]["percentage"],
+                    "fat_pct": product_a["breakdown"]["sat_fat"]["percentage"],
+                    "sodium_pct": product_a["breakdown"]["sodium"]["percentage"],
+                    "verdict": product_a["verdict"]
+                }
+                await client.post(f"{SUPABASE_URL}/rest/v1/scans", headers=headers, json=payload_a)
+
+                if product_b:
+                    payload_b = {
+                        "product_name": product_b.get("product"),
+                        "age_group": age_group,
+                        "sugar_pct": product_b["breakdown"]["sugar"]["percentage"],
+                        "fat_pct": product_b["breakdown"]["sat_fat"]["percentage"],
+                        "sodium_pct": product_b["breakdown"]["sodium"]["percentage"],
+                        "verdict": product_b["verdict"]
+                    }
+                    await client.post(f"{SUPABASE_URL}/rest/v1/scans", headers=headers, json=payload_b)
+        except Exception as e:
+            print(f"Supabase log error: {e}")
+
+    return {
+        "product_a": product_a,
+        "product_b": product_b,
+        "demographic": limits.get("label"),
+        "citations": RULES.get("governing_bodies", []),
+        "disclaimer": "This is an educational tool based on public WHO/ICMR/FSSAI guidelines. It is not medical advice.",
+        # Backwards compatibility top-level fields for single scan
+        "product": product_a.get("product"),
+        "serving_size": product_a.get("serving_size"),
+        "verdict": product_a.get("verdict"),
+        "breakdown": product_a.get("breakdown"),
+        "other_nutrients": product_a.get("other_nutrients"),
+        "hidden_ingredients": product_a.get("hidden_ingredients"),
+        "raw_ingredients": product_a.get("raw_ingredients"),
     }
 
 class Feedback(BaseModel):
@@ -176,6 +224,9 @@ class Feedback(BaseModel):
 
 @app.post("/api/feedback")
 async def submit_feedback(feedback: Feedback):
+    if not (SUPABASE_URL and SUPABASE_KEY):
+        return {"status": "success", "message": "Thank you for your feedback!"}
+
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
