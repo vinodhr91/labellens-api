@@ -38,11 +38,12 @@ CRITICAL INSTRUCTIONS:
 2. Look for "Saturated Fat", "Total Fat", "Protein", "Carbohydrates".
 3. Look for "Sodium" (in mg).
 4. Extract all values PER SERVING. If the label only shows "per 100g", calculate the per-serving value based on the serving size.
+5. Look for the total net weight or net quantity of the product (e.g., 'Net Weight: 150g', 'Net Qty: 100g'). If not found, set to 'Unknown'.
 
 {
   "product_name": "string",
   "serving_size": "string",
-  "net_weight": "string (e.g. 100g, 250ml, or Unknown if not found)",
+  "net_weight": "string (e.g. 150g, 100g, or Unknown)",
   "servings_per_pack": float,
   "sugar_g_per_serving": float,
   "sat_fat_g_per_serving": float,
@@ -95,14 +96,14 @@ def calculate_product_metrics(extracted_data: dict, limits: dict) -> dict:
 
     # Verdict Logic:
     # If the highest metric is >100%, show '🚨 EXCEEDS DAILY LIMITS'
-    # If >=25%, show '⚠️ MODERATE LEVELS'
-    # If <25%, show '✅ WITHIN DAILY LIMITS'
+    # If highest metric 25% - 99%: '⚠️ HIGH LEVELS DETECTED'
+    # If all metrics < 25%: '✅ WITHIN DAILY LIMITS'
     if max_sugar == 0 and (sugar_val > 0 or sodium_val > 0):
         verdict = "🚨 NOT RECOMMENDED FOR INFANTS"
     elif max_pct > 100:
         verdict = "🚨 EXCEEDS DAILY LIMITS"
     elif max_pct >= 25:
-        verdict = "⚠️ MODERATE LEVELS"
+        verdict = "⚠️ HIGH LEVELS DETECTED"
     else:
         verdict = "✅ WITHIN DAILY LIMITS"
 
@@ -210,6 +211,8 @@ async def analyze_label(
         # Backwards compatibility top-level fields for single scan
         "product": product_a.get("product"),
         "serving_size": product_a.get("serving_size"),
+        "net_weight": product_a.get("net_weight"),
+        "servings_per_pack": product_a.get("servings_per_pack"),
         "verdict": product_a.get("verdict"),
         "breakdown": product_a.get("breakdown"),
         "other_nutrients": product_a.get("other_nutrients"),
