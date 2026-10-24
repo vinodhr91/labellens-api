@@ -42,6 +42,8 @@ CRITICAL INSTRUCTIONS:
 {
   "product_name": "string",
   "serving_size": "string",
+  "net_weight": "string (e.g. 100g, 250ml, or Unknown if not found)",
+  "servings_per_pack": float,
   "sugar_g_per_serving": float,
   "sat_fat_g_per_serving": float,
   "sodium_mg_per_serving": float,
@@ -121,6 +123,8 @@ def calculate_product_metrics(extracted_data: dict, limits: dict) -> dict:
     return {
         "product": extracted_data.get("product_name") or "Scanned Food Product",
         "serving_size": extracted_data.get("serving_size") or "Unknown",
+        "net_weight": extracted_data.get("net_weight") or "Unknown",
+        "servings_per_pack": extracted_data.get("servings_per_pack", 0.0),
         "verdict": verdict,
         "breakdown": {
             "sugar": {"value_g": sugar_val, "limit_g": max_sugar, "percentage": sugar_pct, "teaspoons": teaspoons},
