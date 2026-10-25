@@ -17,6 +17,13 @@
     }
   ],
   "age_brackets": {
+    "under-2": {
+      "label": "0 – 12 months",
+      "max_sugar_g": 0,
+      "max_sat_fat_g": 0,
+      "max_sodium_mg": 0,
+      "warning": "Added sugar and salt are not recommended for infants (0 – 12 months)."
+    },
     "1-3": {
       "label": "Age 1–3",
       "max_sugar_g": 27,
@@ -44,13 +51,6 @@
       "max_sat_fat_g": 22,
       "max_sodium_mg": 2000,
       "warning": "FSSAI/WHO standard RDA for adults (2000 kcal)."
-    },
-    "under-2": {
-      "label": "Under 2 years",
-      "max_sugar_g": 0,
-      "max_sat_fat_g": 0,
-      "max_sodium_mg": 0,
-      "warning": "Added sugar and salt are not recommended under age 2."
     }
   }
 }
