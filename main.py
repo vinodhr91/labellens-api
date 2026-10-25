@@ -25,9 +25,19 @@ with open("rules.json", "r") as f:
 
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
-# Get Supabase credentials
-SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip('/')
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+# Get Supabase credentials with resilient normalization
+raw_supabase_url = os.getenv("SUPABASE_URL", "").strip().rstrip('/')
+raw_supabase_key = os.getenv("SUPABASE_KEY", "").strip()
+
+if raw_supabase_url.startswith("sb_") or (not raw_supabase_url.startswith("http") and raw_supabase_key.startswith("http")):
+    SUPABASE_URL = raw_supabase_key.rstrip('/')
+    SUPABASE_KEY = raw_supabase_url
+else:
+    SUPABASE_URL = raw_supabase_url
+    SUPABASE_KEY = raw_supabase_key
+
+if SUPABASE_URL.endswith("/rest/v1"):
+    SUPABASE_URL = SUPABASE_URL[:-8]
 
 PROMPT = """
 You are a precise food label OCR extraction engine. Analyze the provided image of a food label.
@@ -141,10 +151,57 @@ def calculate_product_metrics(extracted_data: dict, limits: dict) -> dict:
         "raw_ingredients": extracted_data.get("ingredients_list"),
     }
 
+async def log_scan_to_supabase(
+    product_name: str,
+    profile_name: str,
+    age_group: str,
+    verdict: str,
+    sugar_pct: float,
+    fat_pct: float,
+    sodium_pct: float,
+):
+    """
+    Inserts a row into the Supabase 'scans' table for every scan.
+    Wrapped in try/except so Supabase failures print to Render logs but never crash the app.
+    """
+    if not (SUPABASE_URL and SUPABASE_KEY):
+        print("[Supabase] Missing SUPABASE_URL or SUPABASE_KEY. Skipping logging.")
+        return
+
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal"
+    }
+
+    payload = {
+        "product_name": product_name or "Unknown Product",
+        "profile_name": profile_name or "Default Profile",
+        "age_group": age_group,
+        "verdict": verdict or "Unknown",
+        "sugar_pct": sugar_pct,
+        "fat_pct": fat_pct,
+        "sodium_pct": sodium_pct,
+    }
+
+    endpoint = f"{SUPABASE_URL}/rest/v1/scans"
+
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            response = await client.post(endpoint, headers=headers, json=payload)
+            if response.status_code >= 400:
+                print(f"[Supabase Error] Failed to log scan ({response.status_code}): {response.text}")
+            else:
+                print(f"[Supabase] Successfully logged scan for '{payload['product_name']}' (Profile: '{payload['profile_name']}')")
+    except Exception as e:
+        print(f"[Supabase Error] Exception while logging scan to Supabase: {e}")
+
 @app.post("/api/analyze")
 async def analyze_label(
     age_group: str = Form(...),
-    gender: str = Form("Unknown"), 
+    gender: str = Form("Unknown"),
+    profile_name: Optional[str] = Form("Default Profile"),
     image1: UploadFile = File(...), 
     image2: Optional[UploadFile] = File(None)
 ):
@@ -169,38 +226,29 @@ async def analyze_label(
         product_a = calculate_product_metrics(extracted_a, limits)
         product_b = None
 
-    # LOG TO SUPABASE DIRECTLY VIA HTTPX
-    if SUPABASE_URL and SUPABASE_KEY:
-        headers = {
-            "apikey": SUPABASE_KEY,
-            "Authorization": f"Bearer {SUPABASE_KEY}",
-            "Content-Type": "application/json",
-            "Prefer": "return=minimal"
-        }
-        try:
-            async with httpx.AsyncClient() as client:
-                payload_a = {
-                    "product_name": product_a.get("product"),
-                    "age_group": age_group,
-                    "sugar_pct": product_a["breakdown"]["sugar"]["percentage"],
-                    "fat_pct": product_a["breakdown"]["sat_fat"]["percentage"],
-                    "sodium_pct": product_a["breakdown"]["sodium"]["percentage"],
-                    "verdict": product_a["verdict"]
-                }
-                await client.post(f"{SUPABASE_URL}/rest/v1/scans", headers=headers, json=payload_a)
+    # Log to Supabase scans table
+    active_profile = (profile_name or "").strip() or "Default Profile"
 
-                if product_b:
-                    payload_b = {
-                        "product_name": product_b.get("product"),
-                        "age_group": age_group,
-                        "sugar_pct": product_b["breakdown"]["sugar"]["percentage"],
-                        "fat_pct": product_b["breakdown"]["sat_fat"]["percentage"],
-                        "sodium_pct": product_b["breakdown"]["sodium"]["percentage"],
-                        "verdict": product_b["verdict"]
-                    }
-                    await client.post(f"{SUPABASE_URL}/rest/v1/scans", headers=headers, json=payload_b)
-        except Exception as e:
-            print(f"Supabase log error: {e}")
+    await log_scan_to_supabase(
+        product_name=product_a.get("product") or "Scanned Food Product",
+        profile_name=active_profile,
+        age_group=age_group,
+        verdict=product_a.get("verdict") or "Unknown",
+        sugar_pct=product_a["breakdown"]["sugar"]["percentage"],
+        fat_pct=product_a["breakdown"]["sat_fat"]["percentage"],
+        sodium_pct=product_a["breakdown"]["sodium"]["percentage"],
+    )
+
+    if product_b:
+        await log_scan_to_supabase(
+            product_name=product_b.get("product") or "Scanned Food Product",
+            profile_name=active_profile,
+            age_group=age_group,
+            verdict=product_b.get("verdict") or "Unknown",
+            sugar_pct=product_b["breakdown"]["sugar"]["percentage"],
+            fat_pct=product_b["breakdown"]["sat_fat"]["percentage"],
+            sodium_pct=product_b["breakdown"]["sodium"]["percentage"],
+        )
 
     return {
         "product_a": product_a,
