@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import sys
 import httpx
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,6 +9,11 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 from typing import Optional
 from pydantic import BaseModel
+
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
 
 load_dotenv()
 app = FastAPI(title="LabelLens API")
@@ -273,34 +279,82 @@ async def analyze_label(
     }
 
 class Feedback(BaseModel):
-    product_name: str
-    user_comment: str
+    product_name: Optional[str] = "Unknown"
+    user_comment: Optional[str] = None
+    reason: Optional[str] = None
     is_accurate: bool
 
 @app.post("/api/feedback")
 async def submit_feedback(feedback: Feedback):
     if not (SUPABASE_URL and SUPABASE_KEY):
-        return {"status": "success", "message": "Thank you for your feedback!"}
+        print("❌ SUPABASE INSERT FAILED: Missing SUPABASE_URL or SUPABASE_KEY environment variables on server.")
+        return {"status": "error", "message": "Supabase configuration missing on server"}
 
+    # 1. Check Data Types: Ensure is_accurate is strictly a Python Boolean (True/False), not a string
+    is_accurate_bool: bool = bool(feedback.is_accurate)
+
+    # Resolve comment / reason text
+    comment_text = feedback.reason or feedback.user_comment or ("Accurate" if is_accurate_bool else "Inaccurate")
+
+    # 2. Check Column Names:
+    # Keys in payload must match Supabase table columns: product_name, is_accurate, user_comment (or reason)
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": "application/json",
-        "Prefer": "return=minimal"
+        "Prefer": "return=representation"  # Returns inserted rows in response body to verify insert succeeded
     }
+
+    # Primary payload using 'user_comment'
     payload = {
-        "product_name": feedback.product_name,
-        "is_accurate": feedback.is_accurate,
-        "user_comment": feedback.user_comment
+        "product_name": feedback.product_name or "Unknown Product",
+        "is_accurate": is_accurate_bool,  # Python boolean True / False
+        "user_comment": comment_text,
     }
-    
+
+    endpoint = f"{SUPABASE_URL}/rest/v1/feedback"
+
     try:
-        async with httpx.AsyncClient() as client:
-            db_response = await client.post(f"{SUPABASE_URL}/rest/v1/feedback", headers=headers, json=payload)
-            if db_response.status_code >= 400:
-                print(f"Feedback Error: {db_response.text}")
-                raise HTTPException(status_code=500, detail="Failed to save feedback")
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            db_response = await client.post(endpoint, headers=headers, json=payload)
+
+            # If Supabase table has column 'reason' instead of 'user_comment', retry with 'reason'
+            if db_response.status_code == 400 and "user_comment" in db_response.text:
+                payload_fallback = {
+                    "product_name": feedback.product_name or "Unknown Product",
+                    "is_accurate": is_accurate_bool,
+                    "reason": comment_text,
+                }
+                db_response = await client.post(endpoint, headers=headers, json=payload_fallback)
+
+            # 3. Check the insert response
+            response_data = None
+            try:
+                response_data = db_response.json()
+            except Exception:
+                pass
+
+            # 4. Handle RLS (Row Level Security) and Error Cases:
+            # REMINDER: If you encounter an RLS error in Render logs, check your Supabase Insert Policy:
+            # 1. In Supabase Dashboard -> Table Editor -> 'feedback'.
+            # 2. Check if RLS is enabled. If enabled, click "Add RLS Policy".
+            # 3. Choose "Enable insert for anon / authenticated users" -> Target roles: anon, authenticated -> WITH CHECK: true.
+            if db_response.status_code >= 400 or not response_data:
+                err_text = db_response.text
+                print(f"❌ SUPABASE INSERT FAILED: Status {db_response.status_code} - {err_text}")
+                
+                # Check for RLS / permission issues specifically
+                lower_err = err_text.lower()
+                if "row-level security" in lower_err or "rls" in lower_err or "permission denied" in lower_err or db_response.status_code == 403:
+                    print("🚨 SUPABASE RLS ERROR: Row Level Security is blocking the insert! Please check your Supabase Insert Policy for table 'feedback'.")
+
+                raise HTTPException(status_code=500, detail=f"Failed to save feedback: {err_text}")
+
+            print(f"✅ SUPABASE INSERT SUCCESS: Successfully inserted feedback row: {response_data}")
+            return {"status": "success", "data": response_data, "message": "Thank you for your feedback!"}
+
+    except HTTPException:
+        raise
     except Exception as e:
+        print(f"❌ SUPABASE INSERT EXCEPTION: {str(e)}")
         raise HTTPException(status_code=500, detail=f"DB Error: {str(e)}")
-        
-    return {"status": "success", "message": "Thank you for your feedback!"}
