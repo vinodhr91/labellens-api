@@ -289,17 +289,20 @@ class Feedback(BaseModel):
 @app.post("/api/feedback")
 async def submit_feedback(feedback: Feedback):
     if not (SUPABASE_URL and SUPABASE_KEY):
-        print("❌ SUPABASE INSERT FAILED: Missing SUPABASE_URL or SUPABASE_KEY environment variables on server.")
+        print("❌ FEEDBACK INSERT FAILED: Missing SUPABASE_URL or SUPABASE_KEY environment variables on server.")
         return {"status": "error", "message": "Supabase configuration missing on server"}
 
-    # 1. Check Data Types: Ensure is_accurate is strictly a Python Boolean (True/False), not a string
+    # 1. Ensure is_accurate is sent as a Python Boolean (True or False), not a string
     is_accurate_bool: bool = bool(feedback.is_accurate)
 
-    # Resolve comment / reason text
-    comment_text = feedback.reason or feedback.user_comment or ("Accurate" if is_accurate_bool else "Inaccurate")
+    # 2. Ensure the data dictionary being inserted exactly matches column names: product_name, is_accurate, reason
+    reason_text = feedback.reason or feedback.user_comment or ("Accurate" if is_accurate_bool else "Inaccurate")
+    data = {
+        "product_name": feedback.product_name or "Unknown Product",
+        "is_accurate": is_accurate_bool,  # Python boolean True / False
+        "reason": reason_text,
+    }
 
-    # 2. Check Column Names:
-    # Keys in payload must match Supabase table columns: product_name, is_accurate, user_comment (or reason)
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -307,56 +310,61 @@ async def submit_feedback(feedback: Feedback):
         "Prefer": "return=representation"  # Returns inserted rows in response body to verify insert succeeded
     }
 
-    # Primary payload using 'user_comment'
-    payload = {
-        "product_name": feedback.product_name or "Unknown Product",
-        "is_accurate": is_accurate_bool,  # Python boolean True / False
-        "user_comment": comment_text,
-    }
-
     endpoint = f"{SUPABASE_URL}/rest/v1/feedback"
 
     try:
         async with httpx.AsyncClient(timeout=8.0) as client:
-            db_response = await client.post(endpoint, headers=headers, json=payload)
+            http_response = await client.post(endpoint, headers=headers, json=data)
 
-            # If Supabase table has column 'reason' instead of 'user_comment', retry with 'reason'
-            if db_response.status_code == 400 and "user_comment" in db_response.text:
-                payload_fallback = {
-                    "product_name": feedback.product_name or "Unknown Product",
-                    "is_accurate": is_accurate_bool,
-                    "reason": comment_text,
-                }
-                db_response = await client.post(endpoint, headers=headers, json=payload_fallback)
-
-            # 3. Check the insert response
-            response_data = None
+            # Parse Supabase response
             try:
-                response_data = db_response.json()
+                raw_json = http_response.json()
             except Exception:
-                pass
+                raw_json = None
 
-            # 4. Handle RLS (Row Level Security) and Error Cases:
-            # REMINDER: If you encounter an RLS error in Render logs, check your Supabase Insert Policy:
-            # 1. In Supabase Dashboard -> Table Editor -> 'feedback'.
-            # 2. Check if RLS is enabled. If enabled, click "Add RLS Policy".
-            # 3. Choose "Enable insert for anon / authenticated users" -> Target roles: anon, authenticated -> WITH CHECK: true.
-            if db_response.status_code >= 400 or not response_data:
-                err_text = db_response.text
-                print(f"❌ SUPABASE INSERT FAILED: Status {db_response.status_code} - {err_text}")
-                
-                # Check for RLS / permission issues specifically
-                lower_err = err_text.lower()
-                if "row-level security" in lower_err or "rls" in lower_err or "permission denied" in lower_err or db_response.status_code == 403:
+            class SupabaseResponse:
+                def __init__(self, data, status_code, text):
+                    self.data = (
+                        data
+                        if (isinstance(data, list) and status_code < 400)
+                        else ([data] if (isinstance(data, dict) and status_code < 400) else [])
+                    )
+                    self.status_code = status_code
+                    self.text = text
+
+                def __repr__(self):
+                    return f"SupabaseResponse(status_code={self.status_code}, data={self.data}, text={self.text})"
+
+            response = SupabaseResponse(
+                data=raw_json,
+                status_code=http_response.status_code,
+                text=http_response.text,
+            )
+
+            # 3. Capture the Supabase response. If response.data is empty, print bright error message
+            if http_response.status_code >= 400 or not response.data:
+                print('❌ FEEDBACK INSERT FAILED:', response)
+
+                # Check for RLS (Row Level Security) permissions
+                # REMINDER: If the error mentions RLS or permissions, check Supabase Insert Policy:
+                # Supabase Dashboard -> Table Editor -> 'feedback' -> Add RLS policy allowing anon insert.
+                lower_err = http_response.text.lower()
+                if (
+                    "row-level security" in lower_err
+                    or "rls" in lower_err
+                    or "permission denied" in lower_err
+                    or http_response.status_code == 403
+                ):
                     print("🚨 SUPABASE RLS ERROR: Row Level Security is blocking the insert! Please check your Supabase Insert Policy for table 'feedback'.")
 
-                raise HTTPException(status_code=500, detail=f"Failed to save feedback: {err_text}")
+                raise HTTPException(status_code=500, detail=f"Failed to save feedback: {http_response.text}")
 
-            print(f"✅ SUPABASE INSERT SUCCESS: Successfully inserted feedback row: {response_data}")
-            return {"status": "success", "data": response_data, "message": "Thank you for your feedback!"}
+            # 4. If it succeeds, print success message
+            print('✅ FEEDBACK SAVED SUCCESSFULLY!')
+            return {"status": "success", "data": response.data, "message": "Thank you for your feedback!"}
 
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ SUPABASE INSERT EXCEPTION: {str(e)}")
+        print('❌ FEEDBACK INSERT FAILED:', str(e))
         raise HTTPException(status_code=500, detail=f"DB Error: {str(e)}")
