@@ -160,18 +160,16 @@ def calculate_product_metrics(extracted_data: dict, limits: dict) -> dict:
 async def log_scan_to_supabase(
     product_name: str,
     age_group: str,
-    verdict: str,
     sugar_pct: float,
     fat_pct: float,
     sodium_pct: float,
-    profile_name: Optional[str] = None,
 ):
     """
     Inserts a row into the Supabase 'scans' table for every scan.
     Wrapped in try/except so Supabase failures print to Render logs but never crash the app.
     """
     if not (SUPABASE_URL and SUPABASE_KEY):
-        print("❌ SCAN LOG FAILED: Missing SUPABASE_URL or SUPABASE_KEY on server.")
+        print("SUPABASE SCAN INSERT: Missing SUPABASE_URL or SUPABASE_KEY on server.")
         return
 
     headers = {
@@ -181,15 +179,14 @@ async def log_scan_to_supabase(
         "Prefer": "return=representation"  # Returns inserted rows in response body to verify insert succeeded
     }
 
-    # Keys in dictionary exactly match the column names in the Supabase 'scans' table:
-    # product_name, age_group, sugar_pct, fat_pct, sodium_pct, verdict
+    # Dictionary ONLY contains these exact keys:
+    # product_name, age_group, sugar_pct, fat_pct, sodium_pct
     data = {
         "product_name": str(product_name or "Unknown Product"),
         "age_group": str(age_group or "Unknown"),
         "sugar_pct": float(sugar_pct) if sugar_pct is not None else 0.0,
         "fat_pct": float(fat_pct) if fat_pct is not None else 0.0,
         "sodium_pct": float(sodium_pct) if sodium_pct is not None else 0.0,
-        "verdict": str(verdict or "Unknown"),
     }
 
     endpoint = f"{SUPABASE_URL}/rest/v1/scans"
@@ -223,13 +220,11 @@ async def log_scan_to_supabase(
                 text=http_response.text,
             )
 
-            # Print loud error to the console if response.data is empty
-            if http_response.status_code >= 400 or not response.data:
-                print('❌ SCAN LOG FAILED:', response)
-            else:
-                print(f"✅ SCAN LOGGED SUCCESSFULLY! (Product: '{data['product_name']}', Age Group: '{data['age_group']}')")
+            # Print exact Supabase response to the console
+            print('SUPABASE SCAN INSERT:', response)
+
     except Exception as e:
-        print('❌ SCAN LOG FAILED:', str(e))
+        print('SUPABASE SCAN INSERT:', f"Exception: {str(e)}")
 
 @app.post("/api/analyze")
 async def analyze_label(
@@ -268,7 +263,6 @@ async def analyze_label(
 
     # Log to Supabase scans table inside an isolated try/except block so it NEVER crashes the scan route
     try:
-        active_profile = (profile_name or "").strip() or "Default Profile"
         sugar_a = product_a.get("breakdown", {}).get("sugar", {}).get("percentage", 0.0)
         fat_a = product_a.get("breakdown", {}).get("sat_fat", {}).get("percentage", 0.0)
         sodium_a = product_a.get("breakdown", {}).get("sodium", {}).get("percentage", 0.0)
@@ -276,11 +270,9 @@ async def analyze_label(
         await log_scan_to_supabase(
             product_name=product_a.get("product") or "Scanned Food Product",
             age_group=age_group,
-            verdict=product_a.get("verdict") or "Unknown",
             sugar_pct=sugar_a,
             fat_pct=fat_a,
             sodium_pct=sodium_a,
-            profile_name=active_profile,
         )
 
         if product_b:
@@ -291,14 +283,12 @@ async def analyze_label(
             await log_scan_to_supabase(
                 product_name=product_b.get("product") or "Scanned Food Product",
                 age_group=age_group,
-                verdict=product_b.get("verdict") or "Unknown",
                 sugar_pct=sugar_b,
                 fat_pct=fat_b,
                 sodium_pct=sodium_b,
-                profile_name=active_profile,
             )
     except Exception as log_err:
-        print('❌ SCAN LOG FAILED:', str(log_err))
+        print('SUPABASE SCAN INSERT:', f"Exception during scan logging: {str(log_err)}")
 
     return {
         "product_a": product_a,
