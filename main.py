@@ -211,9 +211,11 @@ async def analyze_label(
     image1: UploadFile = File(...), 
     image2: Optional[UploadFile] = File(None)
 ):
-    # Normalize age group if formatted as 0-12 months
+    # Normalize age group if formatted as 0-12 months or 10+ years
     if age_group in ("0-12m", "0-12 months", "0 – 12 months", "0-12", "infant"):
         age_group = "under-2"
+    elif age_group in ("10+ years", "10+ yrs", "10+years", "10plus", "10+"):
+        age_group = "10+"
 
     if age_group not in RULES["age_brackets"]:
         raise HTTPException(status_code=400, detail="Invalid age group selected.")
