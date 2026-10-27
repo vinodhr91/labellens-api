@@ -80,8 +80,15 @@ HIDDEN_INGREDIENTS_DB = {
     "high fructose corn syrup": "A highly refined sweetener linked to increased risk of obesity and metabolic issues."
 }
 
-async def extract_label_data(image_bytes: bytes, mime_type: str) -> dict:
+async def extract_label_data(
+    image_bytes: bytes,
+    mime_type: str,
+    image2_bytes: Optional[bytes] = None,
+    image2_mime: Optional[str] = None
+) -> dict:
     content = [PROMPT, {"mime_type": mime_type, "data": image_bytes}]
+    if image2_bytes and image2_mime:
+        content.append({"mime_type": image2_mime, "data": image2_bytes})
     last_err = None
     for model_name in ['gemini-3.5-flash-lite', 'gemini-1.5-flash', 'gemini-2.5-flash']:
         try:
@@ -231,6 +238,7 @@ async def analyze_label(
     age_group: str = Form(...),
     gender: str = Form("Unknown"),
     profile_name: Optional[str] = Form("Default Profile"),
+    scan_mode: Optional[str] = Form("single"),
     image1: UploadFile = File(...), 
     image2: Optional[UploadFile] = File(None)
 ):
@@ -248,8 +256,10 @@ async def analyze_label(
     image1_bytes = await image1.read()
     image2_bytes = await image2.read() if image2 else None
 
-    # If image2 is provided, process both images concurrently
-    if image2_bytes:
+    is_compare = (scan_mode or "").strip().lower() == "compare"
+
+    # If in compare mode with image2, process both images concurrently as separate products
+    if is_compare and image2_bytes:
         extracted_a, extracted_b = await asyncio.gather(
             extract_label_data(image1_bytes, image1.content_type),
             extract_label_data(image2_bytes, image2.content_type)
@@ -257,7 +267,13 @@ async def analyze_label(
         product_a = calculate_product_metrics(extracted_a, limits)
         product_b = calculate_product_metrics(extracted_b, limits)
     else:
-        extracted_a = await extract_label_data(image1_bytes, image1.content_type)
+        # Single product scan: if image2 is provided (e.g. separate sides), analyze both images together
+        extracted_a = await extract_label_data(
+            image1_bytes,
+            image1.content_type,
+            image2_bytes,
+            image2.content_type if image2 else None
+        )
         product_a = calculate_product_metrics(extracted_a, limits)
         product_b = None
 
